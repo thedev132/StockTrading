@@ -169,7 +169,7 @@ market_logger = logging.getLogger('trading.market_data')
 class TradingParameters:
     """Trading parameters configuration"""
     capital_per_stock: float
-    max_position_size: int
+    max_position_size: float
     risk_per_trade: float
     max_drawdown: float
     portfolio_stop_loss: float
@@ -497,7 +497,7 @@ class AdvancedTradingBot:
 
 
     def update_positions(self):
-        """Enhanced position tracking with timestamps"""
+        """Enhanced position tracking with fractional shares support"""
         try:
             positions = self.trading_client.get_all_positions()
             
@@ -509,7 +509,7 @@ class AdvancedTradingBot:
             for p in positions:
                 position_id = f"{p.symbol}_{len(self.positions[p.symbol])}"
                 position_info = {
-                    'qty': float(p.qty),
+                    'qty': round(float(p.qty), 2),  # Round to 2 decimal places
                     'avg_entry_price': float(p.avg_entry_price),
                     'current_price': float(p.current_price),
                     'market_value': float(p.market_value),
@@ -522,11 +522,9 @@ class AdvancedTradingBot:
                 self.positions[p.symbol].append(position_info)
                 self.position_details[position_id] = position_info
                 
-                # # Log position details
-                # logger.info(f"Updated position for {p.symbol}: {position_info}")
-                
         except Exception as e:
             logger.error(f"Error updating positions: {e}")
+
 
     def can_trade(self, ticker: str, signal: str) -> bool:
         """Modified to allow multiple positions per symbol"""
@@ -623,50 +621,57 @@ class AdvancedTradingBot:
         except Exception as e:
             logger.error(f"Error closing positions: {e}")
 
-    def calculate_position_size(self, ticker: str, price: float) -> int:
-        """Enhanced position sizing for multiple positions"""
+    def calculate_position_size(self, ticker: str, price: float) -> float:
+        """Enhanced position sizing with fractional shares support"""
         try:
             account = self.trading_client.get_account()
             buying_power = float(account.buying_power)
             
-            # More aggressive position sizing
+            # Calculate risk-based position value
             risk_amount = buying_power * self.config['trading_parameters']['risk_per_trade'] * 1.5
             
-            # Calculate base position size
-            position_size = int(risk_amount / price)
+            # Calculate precise position size with fractional shares
+            position_size = risk_amount / price
             
             # Scale down size based on existing positions
             existing_positions = len(self.positions.get(ticker, []))
             if existing_positions > 0:
-                position_size = int(position_size * (0.8 ** existing_positions))
+                position_size *= (0.8 ** existing_positions)
             
             # Ensure minimum viable position size
-            min_size = max(1, int(self.config['trading_parameters']['min_position_value'] / price))
+            min_value = self.config['trading_parameters']['min_position_value']
+            min_size = max(0.01, min_value / price)  # Minimum 0.01 shares
             position_size = max(position_size, min_size)
             
-            return min(
+            # Round to 2 decimal places for fractional shares
+            position_size = round(min(
                 position_size,
-                int(self.config['trading_parameters']['max_position_size']),
-                int(buying_power / price)
-            )
+                self.config['trading_parameters']['max_position_size'],
+                buying_power / price
+            ), 2)
+            
+            return position_size
             
         except Exception as e:
             logger.error(f"Error calculating position size: {e}")
-            return 1  # Return minimum size instead of 0
+            return 0.01  # Return minimum fractional size instead of 0
 
 
     def submit_order(self, symbol: str, qty: float, side: OrderSide, 
                     type: OrderType = OrderType.MARKET, 
                     limit_price: Optional[float] = None,
                     stop_price: Optional[float] = None) -> bool:
-        """Submit an order to Alpaca"""
+        """Submit an order to Alpaca with fractional shares support"""
         try:
+            # Round quantity to 2 decimal places
+            qty = round(float(qty), 2)
+            
             # Create base order data
             order_data = {
                 "symbol": symbol,
                 "qty": qty,
                 "side": side,
-                "time_in_force": TimeInForce.GTC  # Now included in the order request
+                "time_in_force": TimeInForce.GTC
             }
             
             # Create the appropriate order request based on type
@@ -766,7 +771,7 @@ class AdvancedTradingBot:
 
 
     def generate_orders(self, ticker: str, signal: str, price: float):
-        """Enhanced order generation with more aggressive selling"""
+        """Enhanced order generation with fractional shares support"""
         try:
             self.update_positions()
             
@@ -775,7 +780,7 @@ class AdvancedTradingBot:
                     if self.should_sell_position(position):
                         order_data = {
                             "symbol": ticker,
-                            "qty": position['qty'],
+                            "qty": round(float(position['qty']), 2),  # Round to 2 decimal places
                             "side": OrderSide.SELL,
                             "type": OrderType.MARKET
                         }
@@ -785,7 +790,7 @@ class AdvancedTradingBot:
             
             if signal == "BUY" and self.can_trade(ticker, signal):
                 position_size = self.calculate_position_size(ticker, price)
-                if position_size > 0:
+                if position_size >= 0.01:  # Minimum fractional share size
                     order_data = {
                         "symbol": ticker,
                         "qty": position_size,
@@ -797,6 +802,7 @@ class AdvancedTradingBot:
                     
         except Exception as e:
             logger.error(f"Error generating orders: {e}")
+
 
     def process_orders(self):
         """Improved order processing"""
